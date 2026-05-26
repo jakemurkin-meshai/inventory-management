@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from pydantic import BaseModel
 from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
+import uuid
+from datetime import datetime, timedelta
 
 app = FastAPI(title="Factory Inventory Management System")
 
@@ -119,6 +121,44 @@ class CreatePurchaseOrderRequest(BaseModel):
     unit_cost: float
     expected_delivery_date: str
     notes: Optional[str] = None
+
+class RestockingItem(BaseModel):
+    item_sku: str
+    item_name: str
+    quantity: int
+    unit_cost: float
+    total_cost: float
+    trend: str
+
+class RestockingOrder(BaseModel):
+    id: str
+    order_number: str
+    items: List[RestockingItem]
+    total_value: float
+    status: str
+    order_date: str
+    expected_delivery: str
+
+class CreateRestockingOrderRequest(BaseModel):
+    items: List[RestockingItem]
+
+# In-memory restocking orders store
+restocking_orders = []
+
+# Realistic unit cost defaults per demand forecast SKU (used when SKU not in inventory)
+_RESTOCK_UNIT_COSTS = {
+    'WDG-001': 45.00,
+    'BRG-102': 85.00,
+    'GSK-203': 12.50,
+    'MTR-304': 450.00,
+    'FLT-405': 8.75,
+    'VLV-506': 125.00,
+    'PSU-501': 55.00,
+    'SNR-420': 35.00,
+    'CTL-330': 180.00,
+}
+
+TREND_PRIORITY = {'increasing': 0, 'stable': 1, 'decreasing': 2}
 
 # API endpoints
 @app.get("/")
@@ -303,6 +343,46 @@ def get_monthly_trends():
     result = list(months.values())
     result.sort(key=lambda x: x['month'])
     return result
+
+@app.get("/api/restocking/recommendations")
+def get_restocking_recommendations():
+    """Get demand forecast items enriched with unit cost, sorted by trend priority"""
+    inventory_by_sku = {item['sku']: item for item in inventory_items}
+    result = []
+    for forecast in demand_forecasts:
+        sku = forecast['item_sku']
+        inv = inventory_by_sku.get(sku)
+        unit_cost = inv['unit_cost'] if inv else _RESTOCK_UNIT_COSTS.get(sku, 50.00)
+        total_cost = round(unit_cost * forecast['forecasted_demand'], 2)
+        result.append({
+            **forecast,
+            'unit_cost': unit_cost,
+            'total_cost': total_cost,
+        })
+    result.sort(key=lambda x: TREND_PRIORITY.get(x['trend'], 99))
+    return result
+
+@app.post("/api/restocking-orders", response_model=RestockingOrder)
+def create_restocking_order(request: CreateRestockingOrderRequest):
+    """Submit a restocking order for recommended items"""
+    now = datetime.utcnow()
+    order_number = f"RST-2025-{len(restocking_orders) + 1:04d}"
+    order = {
+        'id': str(uuid.uuid4()),
+        'order_number': order_number,
+        'items': [item.model_dump() for item in request.items],
+        'total_value': round(sum(item.total_cost for item in request.items), 2),
+        'status': 'Submitted',
+        'order_date': now.isoformat(),
+        'expected_delivery': (now + timedelta(days=14)).isoformat(),
+    }
+    restocking_orders.append(order)
+    return order
+
+@app.get("/api/restocking-orders", response_model=List[RestockingOrder])
+def get_restocking_orders():
+    """Get all submitted restocking orders"""
+    return restocking_orders
 
 if __name__ == "__main__":
     import uvicorn
